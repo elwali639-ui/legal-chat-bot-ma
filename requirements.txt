@@ -1,0 +1,10 @@
+streamlit
+sentence-transformers
+openai-whisper
+gTTS
+arabic-reshaper
+python-bidi
+pydub
+transformers
+accelerate
+torch
