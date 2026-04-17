@@ -1,183 +1,163 @@
 import streamlit as st
-import os, json, torch, requests, tempfile, re
+import os, json, re, tempfile
 from sentence_transformers import SentenceTransformer, util
+import torch
 import whisper
 from gtts import gTTS
 from io import BytesIO
-import arabic_reshaper
-from bidi.algorithm import get_display
 
-# ================= CONFIGURATION =================
+# Configuration
 st.set_page_config(page_title="المساعد القانوني المغربي", page_icon="⚖️", layout="wide")
 
-# Style CSS
+# CSS
 st.markdown("""
 <style>
-    .stButton>button {
-        background: linear-gradient(90deg, #0066cc 0%, #004499 100%);
+    .main-button {
+        background-color: #0066cc;
         color: white;
-        font-size: 18px;
-        font-weight: bold;
-        padding: 12px 0;
-        border-radius: 8px;
+        font-size: 20px;
+        padding: 15px 30px;
+        border-radius: 10px;
         border: none;
         width: 100%;
     }
-    .stButton>button:hover { background: linear-gradient(90deg, #0077ee 0%, #0055bb 100%); }
-    .result-box { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0066cc; }
-    .error-box { background: #ffe6e6; padding: 10px; border-radius: 5px; border-left: 4px solid #cc0000; }
+    .success-box {
+        background-color: #d4edda;
+        border: 2px solid #28a745;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 10px 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border: 2px solid #dc3545;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= CHARGEMENT DES DONNÉES & MODÈLES =================
+# Charger données
 @st.cache_resource
-def load_resources():
-    # 1. Données JSON
+def load_data():
     if os.path.exists("procedures_clean.json"):
         with open("procedures_clean.json", "r", encoding="utf-8") as f:
-            procedures = json.load(f)
-    else:
-        st.error("❌ ملف procedures_clean.json مفقود!"); st.stop()
-    
-    # 2. Modèles Embedding & Whisper (CPU optimisé)
-    device = "cpu"
-    embed_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2', device=device)
-    stt_model = whisper.load_model("base", device=device)
-    return procedures, embed_model, stt_model
+            return json.load(f)
+    return []
 
-procedures, embed_model, stt_model = load_resources()
-st.success(f"✅ {len(procedures)} صفحة قانونية جاهزة | 🧠 النماذج محملة")
+# Charger modèles
+@st.cache_resource
+def load_models():
+    embed_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    stt_model = whisper.load_model("base")
+    return embed_model, stt_model
 
-# ================= FONCTIONS UTILITAIRES =================
-def clean_arabic(text):
-    if not text: return ""
-    try:
-        text = arabic_reshaper.reshape(text)
-        text = get_display(text)
-    except: pass
-    return re.sub(r'\s+', ' ', text).strip()
+# Initialisation
+procedures = load_data()
+if not procedures:
+    st.error("❌ procedures_clean.json مفقود!")
+    st.stop()
 
-def search_rag(query, k=3):
-    """Recherche sémantique locale"""
-    q_emb = embed_model.encode(query, convert_to_tensor=True)
-    texts = [clean_arabic(p["text"][:400]) for p in procedures]
-    t_emb = embed_model.encode(texts, convert_to_tensor=True)
-    scores = util.cos_sim(q_emb, t_emb)[0]
-    top_k = torch.topk(scores, k=min(k, len(scores)))
-    
-    context = ""
-    for idx in top_k.indices:
-        i = idx.item()
-        context += f"[{procedures[i].get('source','?')} ص.{procedures[i].get('page','?')}]: {procedures[i]['text'][:350]}\n\n"
-    return context, scores[top_k.indices[0]].item()
+embed_model, stt_model = load_models()
 
-def get_llm_response(context, question, api_key=""):
-    """Synthèse intelligente via API (HF Gratuit ou OpenAI)"""
-    if not api_key:
-        return None  # Fallback local
-    
-    # Prompt optimisé pour droit marocain + Darija/Arabe
-    prompt = f"""أنت خبير قانوني مغربي. أجب على السؤال بناءً حصراً على السياق التالي.
-إذا لم تجد الإجابة، قل بصراحة: 'لا تتوفر معلومات كافية في الوثائق المتاحة'.
-استخدم لغة عربية قانونية واضحة أو الدارجة المغربية المفهومة.
-السياق:
-{context}
-السؤال: {question}
-الإجابة:"""
+# Interface
+st.title("⚖️ المساعد القانوني المغربي")
+st.markdown(f"### ✅ {len(procedures)} صفحة قانونية جاهزة")
 
-    try:
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 500,
-            "temperature": 0.3
-        }
-        res = requests.post("https://api-inference.huggingface.co/v1/chat/completions", headers=headers, json=payload)
-        return res.json()["choices"][0]["message"]["content"]
-    except:
-        return None
-
-def audio_to_text(audio_bytes):
-    """STT Whisper"""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
-        result = stt_model.transcribe(tmp_path, language="ar")
-        os.unlink(tmp_path)
-        return result["text"].strip()
-    except: return ""
-
-def text_to_audio(text):
-    """TTS gTTS"""
-    try:
-        lang = "fr" if any('\u00C0' <= c <= '\u024F' for c in text) else "ar"
-        tts = gTTS(text=text, lang=lang, slow=False)
-        buf = BytesIO(); tts.write_to_fp(buf); buf.seek(0)
-        return buf
-    except: return None
-
-# ================= INTERFACE UTILISATEUR =================
-st.title("🎙️ المساعد القانوني المغربي الذكي")
-st.markdown("اسأل عن الإجراءات، الوثائق، المساطر... (Darija / Français / Tamazight)")
-
+# Sidebar
 with st.sidebar:
-    st.markdown("### ⚙️ إعدادات متقدمة")
-    hf_token = st.text_input("🔑 مفتاح Hugging Face API (اختياري للجودة العالية)", type="password", help="احصل عليه مجاناً من huggingface.co/settings/tokens")
-    use_voice_out = st.checkbox("🔊 قراءة الإجابة صوتياً", value=True)
-    st.info("💡 بدون مفتاح API: إجابات مباشرة من الوثائق. مع المفتاح: ذكاء اصطناعي متقدم.")
+    st.markdown("### الإعدادات")
+    show_text = st.checkbox("عرض النصوص الأصلية", value=True)
+    voice_output = st.checkbox("قراءة الإجابة صوتياً", value=True)
 
-# Inputs
-col1, col2 = st.columns([3, 1])
-with col1:
-    user_text = st.text_input("✍️ اكتب سؤالك هنا...", placeholder="مثال: شنو هي الوثائق اللي خاصني للطلاق؟", key="txt_in")
-with col2:
-    user_audio = st.audio_input("🎤 سجل صوتك", key="aud_in")
+# Input texte
+st.markdown("### ✍️ اطرح سؤالك")
+question = st.text_input(
+    "اكتب سؤالك هنا:",
+    placeholder="مثال: ما هي الوثائق المطلوبة للطلاق؟",
+    key="question_input"
+)
 
-# BOTTON ENVOYER CLAIR
-if st.button("🚀 إرسال والبحث", key="send_btn"):
-    question = user_text.strip()
+# Input audio
+st.markdown("### 🎤 أو سجل صوتك")
+audio_file = st.audio_input("سجل سؤالك صوتياً", key="audio_recorder")
+
+# Traitement audio
+if audio_file and not question:
+    with st.spinner(" جاري تحويل الصوت إلى نص..."):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                tmp_file.write(audio_file.getvalue())
+                tmp_path = tmp_file.name
+            
+            result = stt_model.transcribe(tmp_path, language="ar")
+            question = result["text"].strip()
+            os.unlink(tmp_path)
+            
+            if question:
+                st.success(f"✅ تم فهم: '{question}'")
+            else:
+                st.error("❌ لم أتمكن من فهم التسجيل. حاول مرة أخرى أو اكتب السؤال.")
+        except Exception as e:
+            st.error(f"❌ خطأ في التعرف على الصوت: {str(e)}")
+            question = ""
+
+# BOTTON ENVOYER
+if st.button("🔍 إرسال والبحث", key="search_button", use_container_width=True):
+    if not question or len(question.strip()) < 3:
+        st.error("⚠️ يرجى كتابة سؤال واضح (3 أحرف على الأقل) أو تسجيل صوتي")
+        st.stop()
     
-    # Traitement Audio si présent
-    if user_audio and not question:
-        with st.spinner("🎧 جاري تحويل الصوت لنص..."):
-            question = audio_to_text(user_audio)
-            if not question:
-                st.error("❌ لم أفهم التسجيل. حاول مرة أخرى أو اكتب السؤال."); st.stop()
-            st.info(f"🗣️ تم فهم: '{question}'")
-    
-    if not question:
-        st.warning("⚠️ يرجى كتابة سؤال أو تسجيل صوتي"); st.stop()
-    
-    # Affichage question
-    st.markdown(f"<div class='result-box'><b>❓ سؤالك:</b> {question}</div>", unsafe_allow_html=True)
+    # Afficher question
+    st.markdown(f"<div class='success-box'><b>سؤالك:</b> {question}</div>", unsafe_allow_html=True)
     
     with st.spinner("🔍 جاري البحث في الوثائق القانونية..."):
-        context, score = search_rag(question, k=3)
+        try:
+            # Recherche sémantique
+            query_embedding = embed_model.encode(question, convert_to_tensor=True)
+            texts = [p["text"][:400] for p in procedures]
+            doc_embeddings = embed_model.encode(texts, convert_to_tensor=True)
+            
+            # Similarité
+            scores = util.cos_sim(query_embedding, doc_embeddings)[0]
+            top_k = torch.topk(scores, k=min(3, len(scores)))
+            
+            if top_k.values[0].item() < 0.3:
+                st.warning("⚠️ لم أجد معلومات دقيقة عن هذا الموضوع. إليك أقرب النتائج:")
+            
+            # Afficher résultats
+            response_text = f" **النتائج المتعلقة بـ '{question}':**\n\n"
+            
+            for idx, score in zip(top_k.indices, top_k.values):
+                i = idx.item()
+                doc = procedures[i]
+                response_text += f"📄 **المصدر:** {doc.get('source', 'غير معروف')} (صفحة {doc.get('page', '?')})\n"
+                response_text += f"📝 **النص:** {doc['text'][:300]}...\n\n"
+                response_text += "---\n\n"
+            
+            response_text += "\n💡 *ملاحظة: هذه الأداة للمساعدة الأولية فقط. راجع دائماً المصادر الرسمية.*"
+            
+            # Afficher
+            st.markdown(response_text.replace("\n", "<br>"), unsafe_allow_html=True)
+            
+            # Audio si demandé
+            if voice_output:
+                with st.spinner("🔊 جاري تحويل النص إلى صوت..."):
+                    try:
+                        lang = "fr" if any('\u00C0' <= c <= '\u024F' for c in response_text) else "ar"
+                        tts = gTTS(text=response_text, lang=lang, slow=False)
+                        audio_bytes = BytesIO()
+                        tts.write_to_fp(audio_bytes)
+                        audio_bytes.seek(0)
+                        st.audio(audio_bytes, format="audio/mpeg")
+                    except Exception as e:
+                        st.warning(f"⚠️ مشكلة في الصوت: {str(e)}")
         
-        if score < 0.5:
-            st.warning("⚠️没有找到完全匹配的信息。عرض أقرب النتائج المتاحة.")
-        
-        # Synthèse LLM si clé fournie, sinon affichage direct
-        final_answer = ""
-        if hf_token:
-            with st.spinner("🤖 الذكاء الاصطناعي يصيغ الإجابة..."):
-                final_answer = get_llm_response(context, question, hf_token)
-        
-        if not final_answer:
-            # Fallback local propre
-            final_answer = f"📖 **بناءً على الوثائق المتاحة:**\n\n{context}\n💡 *ملاحظة: هذه النتائج مستخرجة آلياً من النصوص القانونية. يرجى التأكد من المصادر الرسمية.*"
-        
-        # Affichage réponse
-        st.markdown(f"<div class='result-box'><b>✅ الإجابة:</b><br>{final_answer.replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
-        
-        # Audio réponse
-        if use_voice_out:
-            audio_buf = text_to_audio(final_answer)
-            if audio_buf:
-                st.audio(audio_buf, format="audio/mpeg", start_time=0)
+        except Exception as e:
+            st.error(f"❌ خطأ في البحث: {str(e)}")
+            st.error("💡 حاول سؤالاً آخر أو تحقق من اتصالك بالإنترنت")
 
 # Footer
 st.markdown("---")
-st.caption("⚖️ هذه الأداة للمساعدة الأولية فقط. المرجع الرسمي: الجريدة الرسمية والمحاكم المغربية.")
+st.caption("⚖️ المساعد القانوني المغربي - للمساعدة الأولية فقط")
