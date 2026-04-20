@@ -1,10 +1,6 @@
 streamlit
 sentence-transformers
-openai-whisper
+faster-whisper
 gTTS
-arabic-reshaper
-python-bidi
-pydub
-transformers
-accelerate
+google-generativeai
 torch
